@@ -42,7 +42,11 @@ export class PaymentsService {
     if (link.expires_at && new Date(link.expires_at) < new Date()) {
       throw new BadRequestException('link has expired');
     }
-    if (!link.amount_usdc) {
+    // `pg` returns NUMERIC as a non-empty string, so a stored "0"/"0.0000000"
+    // is truthy — a plain `!link.amount_usdc` check never fires for it and
+    // the zero amount would later blow up Operation.payment() as a 500.
+    // Compare the parsed numeric value instead.
+    if (link.amount_usdc === null || link.amount_usdc === undefined || Number(link.amount_usdc) <= 0) {
       throw new BadRequestException('pay-what-you-want links need an amount param (not yet implemented)');
     }
     if (!link.stellar_base_address) {
@@ -167,52 +171,4 @@ export class PaymentsService {
     const issuer = asset.getIssuer();
     if (!asset.isNative() && issuer) {
       parts.push(`asset_code=${encodeURIComponent(asset.getCode())}`);
-      parts.push(`asset_issuer=${encodeURIComponent(issuer)}`);
-    }
-    parts.push(`memo=${encodeURIComponent(muxedId)}`);
-    parts.push(`memo_type=MEMO_ID`);
-    parts.push(`network_passphrase=${encodeURIComponent(NETWORK_PASSPHRASE)}`);
-
-    return { uri: `web+stellar:pay?${parts.join('&')}` };
-  }
-
-  // Every status is returned, not just 'paid', so the dashboard can show a
-  // held payment with its reason. Totals should count only status = 'paid'.
-  async listForMerchant(merchantId: string) {
-    const { rows } = await pool.query(
-      `SELECT p.id, p.muxed_id, p.amount_usdc, p.fee_usdc, p.net_usdc,
-              p.asset_code, p.payer_address, p.tx_hash, p.created_at,
-              p.status, p.flag_reason, p.fee_status, p.fee_owed_raw::text AS fee_owed_raw, p.fee_asset_code,
-              l.description AS link_description
-       FROM payments p
-       LEFT JOIN links l ON l.id = p.link_id
-       WHERE p.merchant_id = $1
-       ORDER BY p.created_at DESC
-       LIMIT 25`,
-      [merchantId],
-    );
-    return rows;
-  }
-
-  // A real signal, not a fake spinner: a session was reserved (the payer
-  // clicked "Connect & Pay" and got past compliance screening) but no
-  // matching payment has landed yet. True for the handful of seconds
-  // between "submitted" and "confirmed" — exactly the gap where silence
-  // on the merchant's screen would read as broken rather than working.
-  async hasPendingSession(merchantId: string) {
-    const { rows } = await pool.query(
-      `SELECT ls.muxed_id, ls.created_at
-       FROM link_sessions ls
-       WHERE ls.merchant_id = $1
-         AND ls.created_at > NOW() - INTERVAL '3 minutes'
-         AND NOT EXISTS (
-           SELECT 1 FROM payments p
-           WHERE p.merchant_id = ls.merchant_id AND p.muxed_id = ls.muxed_id
-         )
-       ORDER BY ls.created_at DESC
-       LIMIT 1`,
-      [merchantId],
-    );
-    return { pending: rows.length > 0, since: rows[0]?.created_at ?? null };
-  }
-}
+   
