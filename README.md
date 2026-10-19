@@ -571,3 +571,8 @@ I don't have credentials for any of this — these steps need to be done directl
 ## License
 
 [MIT](LICENSE)
+
+## Handsoff notes
+
+<!-- handsoff-issue-62 -->
+- #62: README API reference omits the referral and public Bazaar endpoints
