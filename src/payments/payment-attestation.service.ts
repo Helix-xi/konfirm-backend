@@ -5,7 +5,7 @@ import type { MethodOptions, AssembledTransaction, Result } from '@stellar/stell
 import { Networks } from '@stellar/stellar-sdk';
 import { getFacilitatorSigner, withFacilitatorSubmissionLock } from '../common/facilitator-signer';
 import { NETWORK_PASSPHRASE, RPC_URL, PAYMENT_CONTRACT_ID } from '../common/stellar-network';
-const STROOPS_PER_UNIT = 10_000_000;
+import { toStroops } from '../common/money-rules';
 
 interface PaymentContract {
   // Returns Result<u64, PaymentError> in Rust -- confirmed empirically
@@ -93,7 +93,11 @@ export class PaymentAttestationService {
   }
 
   async attest(input: AttestPaymentInput): Promise<AttestPaymentResult> {
-    const amountStroops = BigInt(Math.round(Number(input.netUsdc) * STROOPS_PER_UNIT));
+    // Exact bigint stroops via the shared converter -- never a float
+    // multiply-then-round, which silently loses precision above ~900,719
+    // USDC (Number.MAX_SAFE_INTEGER boundary) and would be recorded
+    // permanently on an immutable on-chain call.
+    const amountStroops = toStroops(input.netUsdc);
 
     return withFacilitatorSubmissionLock(async () => {
       try {
