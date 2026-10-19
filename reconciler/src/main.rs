@@ -581,6 +581,26 @@ async fn poll_once(
                 );
             }
 
+            // Auto-deactivate the link if it is single-use (reusable=false)
+            // or has now hit its max_uses cap. Only fires when the payment
+            // landed as 'paid' (not held) and is not a duplicate session —
+            // a held or duplicate payment should never count against a link's
+            // usage budget. Done synchronously, before the compliance spawn,
+            // because deactivation is cheap (one indexed UPDATE) and must
+            // happen before the cursor advances — another checkout request
+            // arriving in the window between this payment and the next poll
+            // must see the link as inactive, not accept a new checkout.
+            if !recorded.duplicate_session && verdict.status == "paid" {
+                if let Err(err) = store.maybe_deactivate_link(recorded.link_id).await {
+                    tracing::warn!(
+                        merchant_id = %merchant.id,
+                        link_id = ?recorded.link_id,
+                        error = %err,
+                        "failed to check/deactivate link after payment — link may remain active past its cap"
+                    );
+                }
+            }
+
             // Already flagged and held via the cheap local check above —
             // no need for the slower on-chain check too.
             if !recorded.locally_blocked {

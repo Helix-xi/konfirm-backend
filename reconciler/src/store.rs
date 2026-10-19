@@ -29,6 +29,10 @@ pub struct RecordedPayment {
     /// was stored 'held' with flag_reason 'duplicate_session' instead of
     /// failing the insert. See `record_payment_if_new`.
     pub duplicate_session: bool,
+    /// The link this payment was matched against (via link_sessions). NULL when
+    /// the payment had no session reservation — used by the caller to run
+    /// lifecycle controls (reusable / max_uses deactivation) after the insert.
+    pub link_id: Option<Uuid>,
 }
 
 /// The partial unique index allowing one primary payment per session
@@ -110,6 +114,46 @@ impl Store {
             .fetch_optional(&self.pool)
             .await?;
         Ok(row.is_some())
+    }
+
+    /// Called synchronously after a payment is confirmed as 'paid' — deactivates
+    /// the link if:
+    ///   - reusable = false (single-use link, must stop after first payment), OR
+    ///   - max_uses IS NOT NULL AND
+    ///     COUNT of paid payments for this link >= max_uses (cap reached).
+    ///
+    /// A link_id of NULL means the payment had no session and is not tied to any
+    /// link, so this is a no-op. A link that was already inactive is also a
+    /// no-op — the WHERE clause's `active = true` guard prevents duplicate UPDATEs
+    /// and makes the call safe to retry.
+    ///
+    /// The use_count is recounted from the payments table (COUNT WHERE status='paid')
+    /// rather than being passed in, so this is always accurate against the real
+    /// committed state — no risk of an off-by-one from a cached value.
+    pub async fn maybe_deactivate_link(&self, link_id: Option<Uuid>) -> Result<()> {
+        let Some(link_id) = link_id else {
+            return Ok(());
+        };
+        sqlx::query(
+            "UPDATE links
+             SET active = false
+             WHERE id = $1
+               AND active = true
+               AND (
+                 reusable = false
+                 OR (
+                   max_uses IS NOT NULL
+                   AND (
+                     SELECT COUNT(*) FROM payments
+                     WHERE link_id = $1 AND status = 'paid'
+                   ) >= max_uses
+                 )
+               )",
+        )
+        .bind(link_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// Called by the background on-chain compliance check, never inline in
@@ -290,7 +334,7 @@ impl Store {
             }
         };
 
-        Ok(inserted.map(|(id,)| RecordedPayment { id, locally_blocked, duplicate_session }))
+        Ok(inserted.map(|(id,)| RecordedPayment { id, locally_blocked, duplicate_session, link_id }))
     }
 
     /// What the session reserved for this muxed id: its link, expected amount

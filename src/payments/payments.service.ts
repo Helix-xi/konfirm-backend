@@ -31,7 +31,11 @@ export class PaymentsService {
   // rules can't drift between them.
   private async loadPayableLink(linkId: string) {
     const linkRes = await pool.query(
-      `SELECT l.id, l.amount_usdc, l.currency, l.active, l.expires_at, m.id AS merchant_id, m.stellar_base_address, m.status AS merchant_status
+      `SELECT l.id, l.amount_usdc, l.currency, l.active, l.expires_at,
+              l.reusable, l.max_uses,
+              (SELECT COUNT(*) FROM payments p
+               WHERE p.link_id = l.id AND p.status = 'paid') AS use_count,
+              m.id AS merchant_id, m.stellar_base_address, m.status AS merchant_status
        FROM links l JOIN merchants m ON m.id = l.merchant_id
        WHERE l.id = $1`,
       [linkId],
@@ -41,6 +45,19 @@ export class PaymentsService {
     if (!link.active) throw new BadRequestException('link is not active');
     if (link.expires_at && new Date(link.expires_at) < new Date()) {
       throw new BadRequestException('link has expired');
+    }
+    // A single-use link (reusable = false) accepts exactly one confirmed
+    // payment. The reconciler deactivates it after that payment lands, but
+    // we guard here too so concurrent checkout attempts against an already-
+    // paid single-use link are rejected even if active hasn't been flipped
+    // yet (a short race window between reconciler write and this read).
+    if (!link.reusable && BigInt(link.use_count) >= 1n) {
+      throw new BadRequestException('link has already been used');
+    }
+    // max_uses = NULL means unlimited. Compare use_count (as returned by
+    // Postgres COUNT, which is always a string in pg) against the cap.
+    if (link.max_uses !== null && BigInt(link.use_count) >= BigInt(link.max_uses)) {
+      throw new BadRequestException('link has reached its maximum number of uses');
     }
     if (!link.amount_usdc) {
       throw new BadRequestException('pay-what-you-want links need an amount param (not yet implemented)');
