@@ -4,6 +4,7 @@ import { pool } from '../db/pool';
 
 const HALT_KEY = 'halted_at';
 const HALT_REASON_KEY = 'halt_reason';
+const CAP_OVERRIDE_KEY = 'daily_cap_usdc';
 const SPEND_GUARD_LOCK_KEY = 402_005;
 const CAP_ENV_VAR = 'FACILITATOR_DAILY_SPEND_CAP_USDC';
 
@@ -38,6 +39,21 @@ export function dailyCapConfig(): DailyCapConfig {
     };
   }
   return { capUsdc: Number(raw.trim()), configError: null };
+}
+
+// The DB-backed override (facilitator_state key `daily_cap_usdc`) takes
+// precedence over the env var so the cap can be tuned from the admin UI
+// without a redeploy. When no override is set we fall back to the env var
+// (and its fail-closed validation) exactly as before.
+export function resolveDailyCapConfig(overrideRaw: string | null | undefined): DailyCapConfig {
+  if (overrideRaw === null || overrideRaw === undefined) return dailyCapConfig();
+  if (!CAP_PATTERN.test(overrideRaw.trim())) {
+    return {
+      capUsdc: 0,
+      configError: `daily_cap_usdc=${JSON.stringify(overrideRaw)} is not a valid non-negative USDC amount -- refusing all signing (fail closed)`,
+    };
+  }
+  return { capUsdc: Number(overrideRaw.trim()), configError: null };
 }
 
 export class FacilitatorSpendCapExceeded extends Error {}
@@ -80,8 +96,9 @@ export class FacilitatorSpendGuardService implements OnModuleInit {
       transactionOpen = true;
       await client.query('SELECT pg_advisory_xact_lock($1)', [SPEND_GUARD_LOCK_KEY]);
 
-      const [haltResult, spendResult] = await Promise.all([
+      const [haltResult, capResult, spendResult] = await Promise.all([
         client.query<{ value: string }>('SELECT value FROM facilitator_state WHERE key = $1', [HALT_KEY]),
+        client.query<{ value: string }>('SELECT value FROM facilitator_state WHERE key = $1', [CAP_OVERRIDE_KEY]),
         client.query<{ total: string }>(
           `SELECT COALESCE(SUM(amount_usdc), 0) AS total FROM facilitator_spend_log WHERE created_at >= date_trunc('day', NOW())`,
         ),
@@ -95,7 +112,7 @@ export class FacilitatorSpendGuardService implements OnModuleInit {
       }
 
       const spentToday = Number(spendResult.rows[0].total);
-      const { capUsdc: cap, configError } = dailyCapConfig();
+      const { capUsdc: cap, configError } = resolveDailyCapConfig(capResult.rows[0]?.value);
       if (configError) {
         await this.halt(client, `cap misconfigured: ${configError}`);
         await client.query('COMMIT');
@@ -148,6 +165,16 @@ export class FacilitatorSpendGuardService implements OnModuleInit {
     );
   }
 
+  /** Persists a DB-backed daily cap override so the cap can be tuned from
+   * the admin UI without an env-var change and redeploy. */
+  async setDailyCap(capUsdc: number): Promise<void> {
+    await pool.query(
+      `INSERT INTO facilitator_state (key, value) VALUES ($1, $2)
+       ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()`,
+      [CAP_OVERRIDE_KEY, String(capUsdc)],
+    );
+  }
+
   async status(): Promise<{
     halted: boolean;
     haltedAt: string | null;
@@ -156,14 +183,15 @@ export class FacilitatorSpendGuardService implements OnModuleInit {
     capUsdc: number;
     capConfigError: string | null;
   }> {
-    const [haltedAt, reason, spend] = await Promise.all([
+    const [haltedAt, reason, capOverride, spend] = await Promise.all([
       pool.query<{ value: string }>('SELECT value FROM facilitator_state WHERE key = $1', [HALT_KEY]),
       pool.query<{ value: string }>('SELECT value FROM facilitator_state WHERE key = $1', [HALT_REASON_KEY]),
+      pool.query<{ value: string }>('SELECT value FROM facilitator_state WHERE key = $1', [CAP_OVERRIDE_KEY]),
       pool.query<{ total: string }>(
         `SELECT COALESCE(SUM(amount_usdc), 0) AS total FROM facilitator_spend_log WHERE created_at >= date_trunc('day', NOW())`,
       ),
     ]);
-    const cap = dailyCapConfig();
+    const cap = resolveDailyCapConfig(capOverride.rows[0]?.value);
     return {
       halted: haltedAt.rows.length > 0,
       haltedAt: haltedAt.rows[0]?.value ?? null,
@@ -183,25 +211,4 @@ export class FacilitatorSpendGuardService implements OnModuleInit {
     capConfigError: string | null;
     spentTodayUsdc: number;
   }> {
-    // RETURNING captures exactly what this DELETE cleared, so the caller can
-    // put it in the audit log -- otherwise the halt reason is gone for good.
-    const [cleared, spend] = await Promise.all([
-      pool.query<{ key: string; value: string }>(
-        'DELETE FROM facilitator_state WHERE key IN ($1, $2) RETURNING key, value',
-        [HALT_KEY, HALT_REASON_KEY],
-      ),
-      pool.query<{ total: string }>(
-        `SELECT COALESCE(SUM(amount_usdc), 0) AS total FROM facilitator_spend_log WHERE created_at >= date_trunc('day', NOW())`,
-      ),
-    ]);
-    const byKey = new Map(cleared.rows.map((r) => [r.key, r.value]));
-    const cap = dailyCapConfig();
-    return {
-      haltedAt: byKey.get(HALT_KEY) ?? null,
-      haltReason: byKey.get(HALT_REASON_KEY) ?? null,
-      capUsdc: cap.capUsdc,
-      capConfigError: cap.configError,
-      spentTodayUsdc: Number(spend.rows[0].total),
-    };
-  }
-}
+    // RETURNING captures e
