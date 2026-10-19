@@ -98,8 +98,26 @@ All endpoints are JSON unless noted. Routes marked 🔒 require a valid `konfirm
 |---|---|---|---|
 | `POST` | `/auth/signup` | `email, password, name, stellar_base_address` | Creates the merchant, logs them in immediately |
 | `POST` | `/auth/login` | `email, password` | Same error for wrong email or wrong password — no account enumeration |
-| `POST` | `/auth/logout` | — | Revokes all of the merchant's sessions (bumps `session_version`) and clears the cookie |
+| `POST` | `/auth/logout` | — | Revokes the current session (merchant or member) and clears the cookie |
 | `GET` | `/auth/me` 🔒 | — | Current merchant's claims |
+
+#### Team / multi-user
+
+A merchant account can have multiple members, each with their own email, password, and role (`owner` or `staff`). Sessions from both paths carry `merchant_id` as `id` in the JWT, so all downstream guards and services work unchanged.
+
+Existing merchants (signed up before this feature) call `POST /auth/team/bootstrap-owner` once with a new team-specific password to create their `merchant_members` owner row, then use `POST /auth/team/login` going forward. New merchants signing up via `/auth/signup` continue to use `/auth/login` as before; bootstrap is only needed to unlock the invite endpoints.
+
+| Method | Path | Body | Notes |
+|---|---|---|---|
+| `POST` | `/auth/team/bootstrap-owner` 🔒 | `password` | One-time setup for existing merchants — creates the owner row in `merchant_members`. Idempotent. Must be called before using invite/remove endpoints |
+| `POST` | `/auth/team/login` | `email, password` | Log in as a team member (queries `merchant_members`). Issues the same `konfirm_session` cookie; `member_id` and `role` are embedded in the JWT |
+| `POST` | `/auth/team/invite` 🔒 | `email, role?` | Sends a 48-hour invite email. Owner role only. Re-sending to the same address invalidates the previous open invite |
+| `POST` | `/auth/team/invite/accept` | `token, name, password` | Consumes the invite token, creates the member account, and issues a session cookie immediately |
+| `GET` | `/auth/team/members` 🔒 | — | All members for the authenticated merchant |
+| `GET` | `/auth/team/invites` 🔒 | — | Pending (open, unexpired) invites |
+| `DELETE` | `/auth/team/members/:id` 🔒 | — | Remove a member. Owner only. Cannot remove the last owner |
+
+Admin visibility: `GET /admin/merchants/:id/team` (members + pending invites), `DELETE /admin/merchants/:id/team/members/:memberId` (force-remove, no role guard, logged to `admin_actions`).
 
 ### Links
 
@@ -162,6 +180,8 @@ This table lists every route in `src/admin/admin.controller.ts`, and every route
 | `GET` | `/admin/withdrawal-attempts` 🔐 | — | Merchant cash-outs Konfirm has observed being started, with the anchor's last known status |
 | `POST` | `/admin/merchants/:id/password-reset` 🔐 | `reason` (required) | Emails the merchant a reset link. Only for an active account. Logged as `merchant.password-reset-sent`. Admins never see or set the password |
 | `PATCH` | `/admin/merchants/:id/tier` 🔐 | `risk_tier`, `reason?` | Sets the merchant's risk tier |
+| `GET` | `/admin/merchants/:id/team` 🔐 | — | All team members + pending invites for a merchant |
+| `DELETE` | `/admin/merchants/:id/team/members/:memberId` 🔐 | — | Force-remove a member (no role guard, logged to `admin_actions`) |
 | `GET` | `/admin/links` 🔐 | — | Payment links across every merchant |
 | `GET` | `/admin/blockchain/status` 🔐 | — | Deployed contract addresses and their live status |
 | `GET` | `/admin/notifications` 🔐 | — | Events derived live from existing rows: x402 settlements, disputed payments, stuck withdrawals, blocks. Nothing is stored separately |

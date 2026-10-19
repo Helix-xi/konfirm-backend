@@ -46,6 +46,13 @@ export interface MerchantClaims {
   stellar_base_address: string | null;
   // Bumped on password reset. Tokens issued before a reset stop working.
   sv?: number;
+  // Set for team-member sessions (merchant_members row).
+  // When present, id is still the merchant_id (so all downstream queries
+  // that filter by merchant_id continue to work unchanged), and member_id
+  // is the merchant_members.id used by AuthGuard to verify session_version.
+  member_id?: string;
+  // 'owner' for direct merchant logins; 'owner' or 'staff' for member logins.
+  role?: 'owner' | 'staff';
 }
 
 // Excludes 0/O/1/I — ambiguous when read aloud or typed from memory, which
@@ -252,6 +259,8 @@ export class AuthService {
   // Bumps session_version the same way a password reset does, so the token
   // being logged out (and any copy of it) stops passing AuthGuard. A missing
   // or already-invalid token has nothing to revoke, so it's a no-op.
+  // Member sessions (member_id present) bump merchant_members.session_version;
+  // owner sessions bump merchants.session_version.
   async logout(token: string | undefined): Promise<void> {
     if (!token) return;
     let claims: MerchantClaims;
@@ -260,7 +269,14 @@ export class AuthService {
     } catch {
       return;
     }
-    await pool.query('UPDATE merchants SET session_version = session_version + 1 WHERE id = $1', [claims.id]);
+    if (claims.member_id) {
+      await pool.query(
+        'UPDATE merchant_members SET session_version = session_version + 1 WHERE id = $1',
+        [claims.member_id],
+      );
+    } else {
+      await pool.query('UPDATE merchants SET session_version = session_version + 1 WHERE id = $1', [claims.id]);
+    }
   }
 
   // "Activated" is computed here (EXISTS a paid payment), not stored — see
@@ -326,16 +342,15 @@ export class AuthService {
   }
 
   private issueToken(merchant: MerchantClaims, sessionVersion: number): string {
-    return jwt.sign(
-      {
-        id: merchant.id,
-        email: merchant.email,
-        name: merchant.name,
-        stellar_base_address: merchant.stellar_base_address,
-        sv: sessionVersion,
-      },
-      JWT_SECRET,
-      { expiresIn: TOKEN_TTL },
-    );
+    const payload: Record<string, unknown> = {
+      id: merchant.id,
+      email: merchant.email,
+      name: merchant.name,
+      stellar_base_address: merchant.stellar_base_address,
+      sv: sessionVersion,
+    };
+    if (merchant.member_id) payload.member_id = merchant.member_id;
+    if (merchant.role)      payload.role      = merchant.role;
+    return jwt.sign(payload, JWT_SECRET, { expiresIn: TOKEN_TTL });
   }
 }
