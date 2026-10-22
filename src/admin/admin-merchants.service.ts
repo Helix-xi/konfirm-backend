@@ -5,7 +5,7 @@ import { pool } from '../db/pool';
 export class AdminMerchantsService {
   async list(limit = 50, offset = 0) {
     const { rows } = await pool.query(
-      `SELECT id, email, name, status, risk_tier, stellar_base_address, created_at
+      `SELECT id, email, name, status, risk_tier, fee_bps, stellar_base_address, created_at
        FROM merchants
        ORDER BY created_at DESC
        LIMIT $1 OFFSET $2`,
@@ -56,5 +56,23 @@ export class AdminMerchantsService {
     if (rows.length === 0) throw new NotFoundException('merchant not found');
     const { previous_risk_tier: previous, ...merchant } = rows[0];
     return { merchant, previous: previous as string };
+  }
+
+  // fee_bps is the base rate charged at checkout (see effective-fee.ts) and
+  // was previously fixed at signup with no admin write path. This lets an
+  // admin set a negotiated/comped rate manually, mirroring setTier: the FROM
+  // subquery reads the pre-update row (locked FOR UPDATE) so the previous
+  // rate comes back from the same statement for the audit log.
+  async setFeeBps(id: string, feeBps: number) {
+    const { rows } = await pool.query(
+      `UPDATE merchants m SET fee_bps = $2, updated_at = NOW()
+       FROM (SELECT id, fee_bps FROM merchants WHERE id = $1 FOR UPDATE) old
+       WHERE m.id = old.id
+       RETURNING m.id, m.email, m.name, m.fee_bps, old.fee_bps AS previous_fee_bps`,
+      [id, feeBps],
+    );
+    if (rows.length === 0) throw new NotFoundException('merchant not found');
+    const { previous_fee_bps: previous, ...merchant } = rows[0];
+    return { merchant, previous: previous as number };
   }
 }
