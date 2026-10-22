@@ -165,23 +165,49 @@ export class ReferralRewardsService {
     const divisor = newCount + (BASE_REWARD_DIVISOR_OFFSET - 1);
     const newPromoFeeBps = Math.max(Math.floor(feeBps / divisor), 1);
 
-    // Step 4 — Stack (extend) the reward rather than reset it.
+    // Step 4 — Stack (extend) the reward rather than reset it, unless a
+    // more favorable active promo is already in place.
     //
     // GREATEST(NOW(), promo_expires_at) means:
-    //   - If an existing promo is still active, the new reward extends from
-    //     its current expiry (stacking).
-    //   - If it has already lapsed, the new reward starts from NOW().
-    const { rows: updated } = await pool.query<{ promo_expires_at: Date }>(
+    //   - If an existing promo is still active and isn't more favorable,
+    //     we extend from its end date.
+    //   - If it's expired (or there was never one), we start from now.
+    // This prevents "renewal farming" where an attacker fires a new referral
+    // right before the previous one expires and ends up with a perpetual
+    // promo.  Each new reward adds REWARD_DAYS on top of however much time
+    // was already banked — effectively the same time as a fresh grant, but
+    // no earlier than the natural expiry, so the maximum outstanding discount
+    // at any moment is one REWARD_DAYS window, not N stacked ones.
+    //
+    // promo_volume_cap_usdc is now non-NULL (REWARD_VOLUME_CAP_USDC), capping
+    // the reward to $500 of discounted volume, matching the referred
+    // merchant's own onboarding trial.  NULL was the old behaviour —
+    // explicitly uncapped — which made the reward a permanent unlimited
+    // discount at any volume. Existing promos with a lower fee, or an equal
+    // fee and at least as much volume, are preserved instead of replaced.
+    const { rows: promoRows } = await pool.query(
       `UPDATE merchants
-       SET promo_fee_bps      = $2,
-           promo_volume_cap   = $3,
-           promo_expires_at   = GREATEST(NOW(), COALESCE(promo_expires_at, NOW())) + ($4 || ' days')::interval
+       SET promo_fee_bps       = $2,
+           promo_expires_at    = GREATEST(NOW(), COALESCE(promo_expires_at, NOW()))
+                                 + ($3 * INTERVAL '24 hours'),
+           promo_volume_cap_usdc = $4
        WHERE id = $1
-       RETURNING promo_expires_at`,
-      [referrerId, newPromoFeeBps, REWARD_VOLUME_CAP_USDC, REWARD_DAYS],
+         AND NOT (
+           promo_expires_at > NOW()
+           AND promo_fee_bps IS NOT NULL
+           AND (
+             promo_fee_bps < $2
+             OR (promo_fee_bps = $2 AND (promo_volume_cap_usdc IS NULL OR promo_volume_cap_usdc >= $4))
+           )
+         )
+       RETURNING promo_fee_bps`,
+      [referrerId, newPromoFeeBps, REWARD_DAYS, REWARD_VOLUME_CAP_USDC],
     );
 
-    const newExpiresAt = updated[0]?.promo_expires_at ?? null;
+    if (promoRows.length === 0) {
+      this.logger.log(`kept the more favorable active promo for merchant ${referrerId}`);
+      return;
+    }
 
     this.logger.log(
       `granted referral reward #${newCount} to referrer ${referrerId} ` +
