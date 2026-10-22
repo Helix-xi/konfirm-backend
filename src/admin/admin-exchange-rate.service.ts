@@ -23,6 +23,14 @@ interface OrderBookResponse {
 // one used to actually convert and store payment amounts. Deliberately
 // not shared code: different language/runtime, and this one has looser
 // correctness requirements (a display value, not money-moving).
+
+// Explicit timeout on the Horizon order-book read — a display-only value,
+// but the same timeout discipline applied to every other external fetch in
+// this codebase (anchor-client.ts, retry.ts, mailer.ts). A stalled
+// connection would otherwise hang the admin request indefinitely before
+// the catch below ever fires; this fails fast and returns reachable: false.
+const LIVE_RATE_TIMEOUT_MS = 5_000;
+
 @Injectable()
 export class AdminExchangeRateService {
   private readonly logger = new Logger(AdminExchangeRateService.name);
@@ -30,7 +38,7 @@ export class AdminExchangeRateService {
   async liveXlmUsdcRate(): Promise<{ rate: string | null; reachable: boolean }> {
     try {
       const url = `${HORIZON_URL}/order_book?selling_asset_type=native&buying_asset_type=credit_alphanum4&buying_asset_code=USDC&buying_asset_issuer=${USDC_ISSUER}`;
-      const res = await fetch(url);
+      const res = await fetch(url, { signal: AbortSignal.timeout(LIVE_RATE_TIMEOUT_MS) });
       if (!res.ok) throw new Error(`horizon returned ${res.status}`);
       const body = (await res.json()) as OrderBookResponse;
       const bestBid = body.bids[0] ? Number(body.bids[0].price) : null;

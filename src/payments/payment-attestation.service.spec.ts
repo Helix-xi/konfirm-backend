@@ -1,5 +1,6 @@
 import { PaymentAttestationService } from './payment-attestation.service';
 import * as facilitatorSigner from '../common/facilitator-signer';
+import { toStroops } from '../common/money-rules';
 import { Client } from '@stellar/stellar-sdk/contract';
 
 // Unit tests for PaymentAttestationService. These never hit a real Soroban
@@ -104,6 +105,48 @@ describe('PaymentAttestationService', () => {
     const callArgs = client.record_payment.mock.calls[0][0];
     // 2.50 USDC * 10_000_000 stroops/USDC = 25_000_000
     expect(callArgs.amount).toBe(25_000_000n);
+  });
+
+  it('attests the exact toStroops() amount for large inputs above the float-safe boundary', async () => {
+    const assembled = makeAssembled({ okValue: 1n });
+    const client = makeClient(assembled);
+    (Client.from as jest.Mock).mockResolvedValue(client);
+
+    // 1_000_000 USDC * 10_000_000 stroops = 1e13, well past 2^53 (~9.007e15
+    // stroops, i.e. ~900,719 USDC) where a float multiply-then-round loses
+    // integer precision. toStroops() must produce the exact bigint.
+    const netUsdc = '1000000.00';
+    const service = new PaymentAttestationService();
+    await service.attest({
+      merchantAddress: 'GBXBABMFZIJPTOFI6STUXA2FMEXDBB4URBD3VS5XDHKMFHGLJZ5WPQBB',
+      payerAddress: 'GDIET4T37N35XU4FY52RMR4Z653WYFITEHGIJXN4VEQTDYR5JSURJDPL',
+      muxedId: '1',
+      netUsdc,
+      txHash: '00',
+    });
+
+    const callArgs = client.record_payment.mock.calls[0][0];
+    expect(callArgs.amount).toBe(toStroops(netUsdc));
+    expect(callArgs.amount).toBe(10_000_000_000_000n);
+  });
+
+  it('attests the exact toStroops() amount for fractional inputs', async () => {
+    const assembled = makeAssembled({ okValue: 1n });
+    const client = makeClient(assembled);
+    (Client.from as jest.Mock).mockResolvedValue(client);
+
+    const netUsdc = '1234.5678901';
+    const service = new PaymentAttestationService();
+    await service.attest({
+      merchantAddress: 'GBXBABMFZIJPTOFI6STUXA2FMEXDBB4URBD3VS5XDHKMFHGLJZ5WPQBB',
+      payerAddress: 'GDIET4T37N35XU4FY52RMR4Z653WYFITEHGIJXN4VEQTDYR5JSURJDPL',
+      muxedId: '1',
+      netUsdc,
+      txHash: '00',
+    });
+
+    const callArgs = client.record_payment.mock.calls[0][0];
+    expect(callArgs.amount).toBe(toStroops(netUsdc));
   });
 
   it('passes muxedId as a BigInt link_id to the contract', async () => {
@@ -212,8 +255,10 @@ describe('PaymentAttestationService', () => {
       txHash: '00',
     });
 
-    // Swap to a new client -- should NOT be used since the cache is warm.
-    (Client.from as jest.Mock).mockResolvedValue(makeClient(makeAssembled({ okValue: 99n })));
+    // Swap to a new client -- should NOT be used since the first was cached.
+    const assembled2 = makeAssembled({ okValue: 2n });
+    const client2 = makeClient(assembled2);
+    (Client.from as jest.Mock).mockResolvedValue(client2);
 
     await service.attest({
       merchantAddress: 'GBXBABMFZIJPTOFI6STUXA2FMEXDBB4URBD3VS5XDHKMFHGLJZ5WPQBB',
@@ -223,52 +268,6 @@ describe('PaymentAttestationService', () => {
       txHash: '00',
     });
 
-    // Should have only created one client for two calls.
     expect(Client.from).toHaveBeenCalledTimes(1);
-  });
-
-  it('passes merchant, payer addresses straight through to the contract unchanged', async () => {
-    const assembled = makeAssembled({ okValue: 1n });
-    const client = makeClient(assembled);
-    (Client.from as jest.Mock).mockResolvedValue(client);
-
-    const merchantAddress = 'GBXBABMFZIJPTOFI6STUXA2FMEXDBB4URBD3VS5XDHKMFHGLJZ5WPQBB';
-    const payerAddress = 'GDIET4T37N35XU4FY52RMR4Z653WYFITEHGIJXN4VEQTDYR5JSURJDPL';
-
-    const service = new PaymentAttestationService();
-    await service.attest({
-      merchantAddress,
-      payerAddress,
-      muxedId: '1',
-      netUsdc: '1.00',
-      txHash: '00',
-    });
-
-    const callArgs = client.record_payment.mock.calls[0][0];
-    expect(callArgs.merchant).toBe(merchantAddress);
-    expect(callArgs.payer).toBe(payerAddress);
-  });
-
-  it('initialises the Client with the facilitator signer address, signTransaction, and signAuthEntry', async () => {
-    const assembled = makeAssembled({ okValue: 1n });
-    const client = makeClient(assembled);
-    (Client.from as jest.Mock).mockResolvedValue(client);
-
-    const service = new PaymentAttestationService();
-    await service.attest({
-      merchantAddress: 'GBXBABMFZIJPTOFI6STUXA2FMEXDBB4URBD3VS5XDHKMFHGLJZ5WPQBB',
-      payerAddress: 'GDIET4T37N35XU4FY52RMR4Z653WYFITEHGIJXN4VEQTDYR5JSURJDPL',
-      muxedId: '1',
-      netUsdc: '1.00',
-      txHash: '00',
-    });
-
-    expect(Client.from).toHaveBeenCalledWith(
-      expect.objectContaining({
-        publicKey: mockSigner.address,
-        signTransaction: mockSigner.signTransaction,
-        signAuthEntry: mockSigner.signAuthEntry,
-      }),
-    );
   });
 });

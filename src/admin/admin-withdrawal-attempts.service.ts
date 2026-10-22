@@ -1,8 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { pool } from '../db/pool';
 import { WithdrawalsService } from '../withdrawals/withdrawals.service';
+import { TERMINAL_WITHDRAWAL_STATUSES } from '../common/withdrawal-statuses';
 
-const TERMINAL_STATUSES = ['completed', 'error', 'expired', 'refunded'];
 // Anchor SEP-10 session JWTs are short-lived (~24h on this anchor) — no
 // point re-polling more than once every few seconds regardless, but this
 // also means a stale token will simply stop updating past its expiry
@@ -35,7 +35,7 @@ export class AdminWithdrawalAttemptsService {
     last_status: string | null;
     last_polled_at: string | null;
   }) {
-    const isTerminal = row.last_status && TERMINAL_STATUSES.includes(row.last_status);
+    const isTerminal = row.last_status && TERMINAL_WITHDRAWAL_STATUSES.includes(row.last_status);
     const recentlyPolled = row.last_polled_at && Date.now() - new Date(row.last_polled_at).getTime() < RECENT_POLL_WINDOW_MS;
     if (isTerminal || recentlyPolled) return row;
 

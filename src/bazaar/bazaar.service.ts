@@ -65,13 +65,19 @@ export class BazaarService {
       `SELECT
          COUNT(*) FILTER (WHERE status = 'pending')::int AS pending,
          COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours')::int AS last_day,
-         COUNT(*) FILTER (WHERE url = $1 AND status = 'pending')::int AS same_url_pending
+         COUNT(*) FILTER (WHERE url = $1 AND status = 'pending')::int AS same_url_pending,
+         COUNT(*) FILTER (WHERE url = $1 AND status = 'approved')::int AS same_url_approved
        FROM bazaar_listings`,
       [input.url],
     );
     const c = caps.rows[0];
     if (c.same_url_pending > 0) {
       throw new ConflictException('a listing for this URL is already awaiting review');
+    }
+    // An approved listing already publishes this URL in the manifest; a
+    // second submission would let a duplicate slip through on approval.
+    if (c.same_url_approved > 0) {
+      throw new ConflictException('a listing for this URL has already been approved');
     }
     if (c.pending >= BAZAAR_MAX_PENDING || c.last_day >= BAZAAR_MAX_PER_DAY) {
       throw new ServiceUnavailableException('the listing queue is full right now — please try again later');

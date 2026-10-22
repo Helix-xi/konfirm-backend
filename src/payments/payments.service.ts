@@ -173,9 +173,26 @@ export class PaymentsService {
   // yet) — only the destination, asset, amount, and memo are fixed ahead of
   // time. A wallet lacking a USDC trustline is expected to prompt for one
   // itself; SEP-7 has no equivalent to bundling ChangeTrust in advance.
+  //
+  // SEP-7's `pay` request can only express a single payment, so it cannot
+  // carry the additive platform-fee leg that prepareTx adds as a second
+  // operation. Serving a fee-free URI for a fee-bearing link would be a
+  // complete fee bypass (the same link pays $0 if the payer scans the QR
+  // instead of using Freighter). So when the link's effective fee is
+  // non-zero we refuse to build a URI at all, forcing fee-bearing
+  // checkouts onto prepareTx. This is enforced here, server-side, not via
+  // any frontend toggle.
   async buildPayUri(linkId: string, muxedId: string): Promise<{ uri: string }> {
     const link = await this.loadPayableLink(linkId);
     const asset = resolveAsset(link.currency);
+
+    const feeBps = await getEffectiveFeeBps(link.merchant_id);
+    const feeAmount = feeStroops(toStroops(String(link.amount_usdc)), feeBps, toStroops(platformFeeFloor()));
+    if (feeAmount > 0n) {
+      throw new BadRequestException(
+        'this link carries a platform fee and cannot be paid via a SEP-7 QR code; use the prepared-transaction checkout instead',
+      );
+    }
 
     const parts = [
       `destination=${encodeURIComponent(link.stellar_base_address)}`,
@@ -184,52 +201,4 @@ export class PaymentsService {
     const issuer = asset.getIssuer();
     if (!asset.isNative() && issuer) {
       parts.push(`asset_code=${encodeURIComponent(asset.getCode())}`);
-      parts.push(`asset_issuer=${encodeURIComponent(issuer)}`);
-    }
-    parts.push(`memo=${encodeURIComponent(muxedId)}`);
-    parts.push(`memo_type=MEMO_ID`);
-    parts.push(`network_passphrase=${encodeURIComponent(NETWORK_PASSPHRASE)}`);
-
-    return { uri: `web+stellar:pay?${parts.join('&')}` };
-  }
-
-  // Every status is returned, not just 'paid', so the dashboard can show a
-  // held payment with its reason. Totals should count only status = 'paid'.
-  async listForMerchant(merchantId: string) {
-    const { rows } = await pool.query(
-      `SELECT p.id, p.muxed_id, p.amount_usdc, p.fee_usdc, p.net_usdc,
-              p.asset_code, p.payer_address, p.tx_hash, p.created_at,
-              p.status, p.flag_reason, p.fee_status, p.fee_owed_raw::text AS fee_owed_raw, p.fee_asset_code,
-              l.description AS link_description
-       FROM payments p
-       LEFT JOIN links l ON l.id = p.link_id
-       WHERE p.merchant_id = $1
-       ORDER BY p.created_at DESC
-       LIMIT 25`,
-      [merchantId],
-    );
-    return rows;
-  }
-
-  // A real signal, not a fake spinner: a session was reserved (the payer
-  // clicked "Connect & Pay" and got past compliance screening) but no
-  // matching payment has landed yet. True for the handful of seconds
-  // between "submitted" and "confirmed" — exactly the gap where silence
-  // on the merchant's screen would read as broken rather than working.
-  async hasPendingSession(merchantId: string) {
-    const { rows } = await pool.query(
-      `SELECT ls.muxed_id, ls.created_at
-       FROM link_sessions ls
-       WHERE ls.merchant_id = $1
-         AND ls.created_at > NOW() - INTERVAL '3 minutes'
-         AND NOT EXISTS (
-           SELECT 1 FROM payments p
-           WHERE p.merchant_id = ls.merchant_id AND p.muxed_id = ls.muxed_id
-         )
-       ORDER BY ls.created_at DESC
-       LIMIT 1`,
-      [merchantId],
-    );
-    return { pending: rows.length > 0, since: rows[0]?.created_at ?? null };
-  }
-}
+   

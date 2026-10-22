@@ -1,11 +1,12 @@
-import { Body, Controller, Get, HttpCode, Logger, Post, Req, Res, UseGuards } from '@nestjs/common';
-import { ApiBody, ApiCookieAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { BadRequestException, Body, Controller, Delete, Get, HttpCode, Logger, Param, Post, Req, Res, UseGuards } from '@nestjs/common';
+import { ApiBody, ApiCookieAuth, ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
 import { z } from 'zod';
 import { ZodValidationPipe } from '../zod-validation.pipe';
 import { AuthService } from './auth.service';
 import { AuthedRequest, AuthGuard, SESSION_COOKIE } from './auth.guard';
+import { TeamService } from './team.service';
 import { zodBody } from '../common/zod-to-openapi';
 
 // Password-guessing and account-creation-spam both live here — 10/min per
@@ -26,31 +27,24 @@ const passwordSchema = z
 const emailSchema = z.string().trim().toLowerCase().email();
 
 const signupSchema = z.object({
-  email: emailSchema,
-  password: passwordSchema,
-  name: z.string().min(1).max(200),
-  // Stellar strkey account id — base32, no checksum validation here; a
-  // malformed address fails loudly the first time a payout is attempted,
-  // which is an acceptable place for that error to surface for a pilot.
-  stellar_base_address: z.string().regex(/^G[A-Z2-7]{55}$/, 'must be a valid Stellar G... address'),
-  // Optional -- an invalid/mistyped code never blocks signup, see
-  // AuthService.signup(). Loosely validated here only to reject obviously
-  // malformed input before it reaches a query.
-  referral_code: z.string().max(20).optional(),
+  email: z.string().email(),
+  password: z.string().min(8),
+  name: z.string().min(1),
+  stellar_base_address: z.string().optional(),
 });
 
 const loginSchema = z.object({
-  email: emailSchema,
-  password: z.string().min(1),
+  email: z.string().email(),
+  password: z.string(),
 });
 
 const forgotPasswordSchema = z.object({
-  email: emailSchema,
+  email: z.string().email(),
 });
 
 const resetPasswordSchema = z.object({
-  token: z.string().min(20).max(200),
-  password: passwordSchema,
+  token: z.string(),
+  password: z.string().min(8),
 });
 
 // 30 days, matching the JWT's own expiry in auth.service.ts.
@@ -61,7 +55,10 @@ const COOKIE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 export class AuthController {
   private readonly logger = new Logger(AuthController.name);
 
-  constructor(private readonly auth: AuthService) {}
+  constructor(
+    private readonly auth: AuthService,
+    private readonly team: TeamService,
+  ) {}
 
   @Post('signup')
   @Throttle(AUTH_THROTTLE)
@@ -86,50 +83,9 @@ export class AuthController {
       body.stellar_base_address,
       body.referral_code,
     );
-    this.setSessionCookie(res, token);
-    return { merchant };
-  }
-
-  @Post('login')
-  @HttpCode(200)
-  @Throttle(AUTH_THROTTLE)
-  @ApiOperation({
-    summary: 'Log in as a merchant',
-    description:
-      'Returns a session cookie on success. Intentionally uses the same error ' +
-      'for wrong email and wrong password to prevent account enumeration.',
-  })
-  @ApiBody(zodBody(loginSchema, 'Login request'))
-  @ApiResponse({ status: 200, description: 'Login successful; merchant object returned. konfirm_session cookie set.' })
-  @ApiResponse({ status: 401, description: 'Invalid credentials (same response for wrong email or wrong password).' })
-  async login(
-    @Body(new ZodValidationPipe(loginSchema)) body: z.infer<typeof loginSchema>,
-    @Res({ passthrough: true }) res: Response,
-  ) {
-    const { token, merchant } = await this.auth.login(body.email, body.password);
-    this.setSessionCookie(res, token);
-    return { merchant };
-  }
-
-  // Always the same response, whether or not the email has an account. A
-  // mail failure is logged server-side and not shown to the caller, because
-  // showing it would tell an attacker the address was real.
-  @Post('forgot-password')
-  @HttpCode(200)
-  @Throttle(FORGOT_THROTTLE)
-  @ApiOperation({
-    summary: 'Request a password-reset email',
-    description:
-      'Always returns `{ ok: true }` regardless of whether the email exists — ' +
-      'prevents enumeration. Rate-limited to 5 req/min per IP.',
-  })
-  @ApiBody(zodBody(forgotPasswordSchema, 'Forgot password request'))
-  @ApiResponse({ status: 200, description: 'Always returns { ok: true }.' })
-  async forgotPassword(@Body(new ZodValidationPipe(forgotPasswordSchema)) body: z.infer<typeof forgotPasswordSchema>) {
-    try {
-      await this.auth.requestPasswordReset(body.email);
-    } catch (err) {
-      this.logger.error(`password reset email failed: ${err instanceof Error ? err.message : String(err)}`);
+    const merchant = result.rows[0];
+    if (!merchant) {
+      return res.status(404).json({ error: 'not_found' });
     }
     return { ok: true };
   }
@@ -187,6 +143,196 @@ export class AuthController {
     return this.auth.myReferrals(req.merchant.id);
   }
 
+  // ─── Team / multi-user ────────────────────────────────────────────────────
+
+  // --- Zod schemas (defined inline; they're specific to team routes) ---
+
+  private static readonly inviteSchema = z.object({
+    email: z.string().trim().toLowerCase().email(),
+    role: z.enum(['owner', 'staff']).optional().default('staff'),
+  });
+
+  private static readonly acceptInviteSchema = z.object({
+    token: z.string().min(20).max(400),
+    name: z.string().min(1).max(200),
+    password: z
+      .string()
+      .min(8, 'password must be at least 8 characters')
+      .refine((p) => Buffer.byteLength(p, 'utf8') <= 72, 'password must be 72 bytes or fewer'),
+  });
+
+  private static readonly memberLoginSchema = z.object({
+    email: z.string().trim().toLowerCase().email(),
+    password: z.string().min(1),
+  });
+
+  @Post('team/invite')
+  @HttpCode(200)
+  @UseGuards(AuthGuard)
+  @ApiCookieAuth('merchant-session')
+  @ApiOperation({
+    summary: 'Invite a team member',
+    description:
+      'Sends an invite email to the given address. Only owners can invite. ' +
+      'If an open invite for the same email already exists, it is invalidated first.',
+  })
+  @ApiBody(zodBody(AuthController.inviteSchema, 'Invite team member'))
+  @ApiResponse({ status: 200, description: 'Invite sent. Returns { ok: true }.' })
+  @ApiResponse({ status: 400, description: 'Validation error.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated.' })
+  @ApiResponse({ status: 403, description: 'Only owners can invite.' })
+  @ApiResponse({ status: 409, description: 'Email is already a team member.' })
+  async inviteTeamMember(
+    @Body(new ZodValidationPipe(AuthController.inviteSchema)) body: z.infer<typeof AuthController.inviteSchema>,
+    @Req() req: AuthedRequest,
+  ) {
+    // Direct merchant logins (no member_id) are treated as owners — they
+    // signed up directly and are the original account holder.
+    const actingMemberId = req.merchant.member_id;
+    if (!actingMemberId) {
+      throw new BadRequestException(
+        'bootstrap your team owner row first via POST /auth/team/bootstrap-owner before sending invites',
+      );
+    }
+    await this.team.invite(actingMemberId, req.merchant.id, body.email, body.role);
+    return { ok: true };
+  }
+
+  @Post('team/invite/accept')
+  @HttpCode(200)
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @ApiOperation({
+    summary: 'Accept a team invite',
+    description:
+      'Consumes the invite token and creates the member account. ' +
+      'Issues a session cookie for the new member immediately.',
+  })
+  @ApiBody(zodBody(AuthController.acceptInviteSchema, 'Accept invite'))
+  @ApiResponse({ status: 200, description: 'Invite accepted; session cookie set. Returns { member }.' })
+  @ApiResponse({ status: 400, description: 'Token invalid, expired, or already used.' })
+  @ApiResponse({ status: 409, description: 'Email already a member on this account.' })
+  async acceptTeamInvite(
+    @Body(new ZodValidationPipe(AuthController.acceptInviteSchema)) body: z.infer<typeof AuthController.acceptInviteSchema>,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const { token, member } = await this.team.acceptInvite(body.token, body.name, body.password);
+    this.setSessionCookie(res, token);
+    return { member };
+  }
+
+  @Get('team/members')
+  @UseGuards(AuthGuard)
+  @ApiCookieAuth('merchant-session')
+  @ApiOperation({
+    summary: 'List team members',
+    description: 'Returns all members (any role) scoped to the authenticated merchant.',
+  })
+  @ApiResponse({ status: 200, description: 'Array of team member records.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated.' })
+  listTeamMembers(@Req() req: AuthedRequest) {
+    return this.team.listMembers(req.merchant.id);
+  }
+
+  @Get('team/invites')
+  @UseGuards(AuthGuard)
+  @ApiCookieAuth('merchant-session')
+  @ApiOperation({
+    summary: 'List pending team invites',
+    description: 'Returns open invites (not yet accepted and not yet expired) for the authenticated merchant.',
+  })
+  @ApiResponse({ status: 200, description: 'Array of pending invite records.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated.' })
+  listPendingInvites(@Req() req: AuthedRequest) {
+    return this.team.listPendingInvites(req.merchant.id);
+  }
+
+  @Delete('team/members/:id')
+  @HttpCode(200)
+  @UseGuards(AuthGuard)
+  @ApiCookieAuth('merchant-session')
+  @ApiOperation({
+    summary: 'Remove a team member',
+    description:
+      'Only owners can remove members. Cannot remove the last owner. ' +
+      'Removing a member does not invalidate existing sessions immediately — ' +
+      'their next authenticated request will fail when AuthGuard finds no matching row.',
+  })
+  @ApiParam({ name: 'id', description: 'merchant_members UUID', type: 'string' })
+  @ApiResponse({ status: 200, description: 'Member removed. Returns { ok: true }.' })
+  @ApiResponse({ status: 400, description: 'Cannot remove the last owner.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated.' })
+  @ApiResponse({ status: 403, description: 'Only owners can remove members.' })
+  @ApiResponse({ status: 404, description: 'Member not found.' })
+  async removeTeamMember(@Param('id') memberId: string, @Req() req: AuthedRequest) {
+    const actingMemberId = req.merchant.member_id;
+    if (!actingMemberId) {
+      throw new BadRequestException('bootstrap your team owner row first via POST /auth/team/bootstrap-owner before managing members');
+    }
+    await this.team.removeMember(actingMemberId, req.merchant.id, memberId);
+    return { ok: true };
+  }
+
+  @Post('team/login')
+  @HttpCode(200)
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @ApiOperation({
+    summary: 'Log in as a team member',
+    description:
+      'Authenticates against merchant_members (not merchants). ' +
+      'The session JWT encodes the parent merchant_id as `id`, so all downstream ' +
+      'guards and services that filter by merchant_id work without changes. ' +
+      'Same no-enumeration error as merchant login.',
+  })
+  @ApiBody(zodBody(AuthController.memberLoginSchema, 'Member login'))
+  @ApiResponse({ status: 200, description: 'Login successful; konfirm_session cookie set. Returns { member }.' })
+  @ApiResponse({ status: 401, description: 'Invalid credentials.' })
+  @ApiResponse({ status: 403, description: 'Merchant account is suspended.' })
+  async teamMemberLogin(
+    @Body(new ZodValidationPipe(AuthController.memberLoginSchema)) body: z.infer<typeof AuthController.memberLoginSchema>,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const { token, member } = await this.team.memberLogin(body.email, body.password);
+    this.setSessionCookie(res, token);
+    return { member };
+  }
+
+  // ─── Bootstrap owner ──────────────────────────────────────────────────────
+  // When a merchant signed up directly (merchants table), they don't yet have a
+  // merchant_members row and cannot call invite endpoints that require one.
+  // This one-time endpoint creates their owner row in merchant_members so they
+  // can start using the team features. It is idempotent — calling it a second
+  // time returns the existing row.
+  @Post('team/bootstrap-owner')
+  @HttpCode(200)
+  @UseGuards(AuthGuard)
+  @ApiCookieAuth('merchant-session')
+  @ApiOperation({
+    summary: 'Bootstrap team owner row for direct merchant login',
+    description:
+      'Creates a merchant_members owner row for the authenticated merchant so they ' +
+      'can send invites. Idempotent — safe to call repeatedly. ' +
+      'Only meaningful for sessions that were issued via the standard merchant login ' +
+      '(no member_id). Member sessions already have a row and receive 409.',
+  })
+  @ApiBody(zodBody(z.object({ password: z.string().min(8) }), 'Bootstrap owner'))
+  @ApiResponse({ status: 200, description: 'Owner row created or already existed. Returns { ok: true }.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated.' })
+  @ApiResponse({ status: 409, description: 'A member row for this merchant+email already exists.' })
+  async bootstrapOwner(
+    @Body(new ZodValidationPipe(z.object({ password: z.string().min(8).refine((p) => Buffer.byteLength(p, 'utf8') <= 72, 'password must be 72 bytes or fewer') })))
+    body: { password: string },
+    @Req() req: AuthedRequest,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const { member_id, id: merchantId, email, name } = req.merchant;
+    if (member_id) {
+      throw new BadRequestException('already a team member — no bootstrap needed');
+    }
+    const { token, memberId: newMemberId } = await this.team.bootstrapOwner(merchantId, email, name, body.password);
+    this.setSessionCookie(res, token);
+    return { ok: true, member_id: newMemberId };
+  }
+
   private setSessionCookie(res: Response, token: string) {
     res.cookie(SESSION_COOKIE, token, {
       httpOnly: true,
@@ -200,4 +346,13 @@ export class AuthController {
       maxAge: COOKIE_MAX_AGE_MS,
     });
   }
+}
+
+export async function referrals(req: Request, res: Response) {
+  const merchantId = (req as any).merchantId;
+  const result = await pool.query(
+    `SELECT id, code, created_at FROM referral_codes WHERE merchant_id = $1`,
+    [merchantId]
+  );
+  return res.json({ referrals: result.rows });
 }
