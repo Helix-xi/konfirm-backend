@@ -32,3 +32,16 @@ CREATE TABLE IF NOT EXISTS password_reset_tokens (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS password_reset_tokens_merchant_idx ON password_reset_tokens(merchant_id);
+
+-- 4. One-time email-verification tokens, same shape as the reset tokens above.
+--    Signup inserts the merchant as 'pending' and issues one of these; the
+--    confirm endpoint validates it and flips the merchant to 'active'.
+CREATE TABLE IF NOT EXISTS email_verification_tokens (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    merchant_id UUID NOT NULL REFERENCES merchants(id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at TIMESTAMPTZ NOT NULL,
+    used_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS email_verification_tokens_merchant_idx ON email_verification_tokens(merchant_id);

@@ -28,5 +28,7 @@ export const pool = new Pool({
   // role default happens to be — date_trunc('day', NOW()) (facilitator
   // spend cap, admin stats, fee revenue) truncates in the session timezone,
   // so an inherited non-UTC default would silently move the daily reset.
+  // This also keeps day-bucketing queries aligned with the JS side, which
+  // keys daily_volume buckets by UTC calendar day.
   options: '-c timezone=UTC',
 });

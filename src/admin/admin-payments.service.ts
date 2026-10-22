@@ -35,6 +35,22 @@ export class AdminPaymentsService {
     );
     if (rows.length === 0) throw new NotFoundException('payment not found');
     const { previous_status: previous, ...payment } = rows[0];
+
+    // Referral reward claw-back (issue #57): a referral reward is granted once a
+    // qualifying payment reaches 'paid'. If that payment is later moved to a
+    // non-qualifying status ('disputed'/'refunded'), revoke the reward so the
+    // referrer does not keep it. Idempotent: only rows still granted are revoked.
+    if (status !== 'paid') {
+      await pool.query(
+        `UPDATE referral_rewards r
+         SET reward_granted_at = NULL, revoked_at = now(), revoked_reason = $2
+         WHERE r.qualifying_payment_id = $1
+           AND r.reward_granted_at IS NOT NULL
+           AND r.revoked_at IS NULL`,
+        [id, `qualifying payment set to ${status}`],
+      );
+    }
+
     return { payment, previous: previous as string };
   }
 }

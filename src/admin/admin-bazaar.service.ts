@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { pool } from '../db/pool';
 
 @Injectable()
@@ -16,6 +16,25 @@ export class AdminBazaarService {
   }
 
   async setStatus(id: string, status: 'approved' | 'rejected', adminId: string) {
+    // Before approving, surface any other approved listing for the same URL so
+    // a duplicate can't slip through and appear twice in the public manifest.
+    if (status === 'approved') {
+      const { rows: conflicts } = await pool.query(
+        `SELECT other.id, other.name, other.url, other.status, other.reviewed_at
+         FROM bazaar_listings target
+         JOIN bazaar_listings other
+           ON other.url = target.url AND other.id <> target.id AND other.status = 'approved'
+         WHERE target.id = $1`,
+        [id],
+      );
+      if (conflicts.length > 0) {
+        throw new ConflictException({
+          message: 'another approved listing already exists for this URL',
+          existing: conflicts,
+        });
+      }
+    }
+
     // The self-join reads the pre-update row, so the audit log can record
     // what status this transition came from.
     const { rows } = await pool.query(
