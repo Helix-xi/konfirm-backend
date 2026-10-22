@@ -12,7 +12,14 @@ import { zodBody } from '../common/zod-to-openapi';
 // could create a Link against someone else's account. It now comes only
 // from the authenticated session (req.merchant.id).
 const createLinkSchema = z.object({
-  amount_usdc: nonNegativeDecimalStringSchema('amount_usdc', 7, 999_999_999_999_999_999n).optional(),
+  // A link with amount_usdc = "0" is unpayable: the Stellar SDK rejects
+  // Operation.payment({ amount: "0" }), so payers would hit a generic 500.
+  // Reject zero (and any non-positive value) at creation time with a 400.
+  amount_usdc: nonNegativeDecimalStringSchema('amount_usdc', 7, 999_999_999_999_999_999n)
+    .refine((value) => Number(value) > 0, {
+      message: 'amount_usdc must be greater than 0',
+    })
+    .optional(),
   currency: z.enum(['USDC', 'EURC', 'XLM']).optional(),
   description: z.string().max(500).optional(),
   reusable: z.boolean().optional(),
@@ -38,6 +45,7 @@ export class LinksController {
   })
   @ApiBody(zodBody(createLinkSchema, 'Create link request'))
   @ApiResponse({ status: 201, description: 'Payment link created.' })
+  @ApiResponse({ status: 400, description: 'Invalid request body.' })
   @ApiResponse({ status: 401, description: 'Not authenticated.' })
   create(
     @Body(new ZodValidationPipe(createLinkSchema)) body: z.infer<typeof createLinkSchema>,

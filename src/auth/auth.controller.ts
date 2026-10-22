@@ -27,31 +27,24 @@ const passwordSchema = z
 const emailSchema = z.string().trim().toLowerCase().email();
 
 const signupSchema = z.object({
-  email: emailSchema,
-  password: passwordSchema,
-  name: z.string().min(1).max(200),
-  // Stellar strkey account id — base32, no checksum validation here; a
-  // malformed address fails loudly the first time a payout is attempted,
-  // which is an acceptable place for that error to surface for a pilot.
-  stellar_base_address: z.string().regex(/^G[A-Z2-7]{55}$/, 'must be a valid Stellar G... address'),
-  // Optional -- an invalid/mistyped code never blocks signup, see
-  // AuthService.signup(). Loosely validated here only to reject obviously
-  // malformed input before it reaches a query.
-  referral_code: z.string().max(20).optional(),
+  email: z.string().email(),
+  password: z.string().min(8),
+  name: z.string().min(1),
+  stellar_base_address: z.string().optional(),
 });
 
 const loginSchema = z.object({
-  email: emailSchema,
-  password: z.string().min(1),
+  email: z.string().email(),
+  password: z.string(),
 });
 
 const forgotPasswordSchema = z.object({
-  email: emailSchema,
+  email: z.string().email(),
 });
 
 const resetPasswordSchema = z.object({
-  token: z.string().min(20).max(200),
-  password: passwordSchema,
+  token: z.string(),
+  password: z.string().min(8),
 });
 
 // 30 days, matching the JWT's own expiry in auth.service.ts.
@@ -90,50 +83,9 @@ export class AuthController {
       body.stellar_base_address,
       body.referral_code,
     );
-    this.setSessionCookie(res, token);
-    return { merchant };
-  }
-
-  @Post('login')
-  @HttpCode(200)
-  @Throttle(AUTH_THROTTLE)
-  @ApiOperation({
-    summary: 'Log in as a merchant',
-    description:
-      'Returns a session cookie on success. Intentionally uses the same error ' +
-      'for wrong email and wrong password to prevent account enumeration.',
-  })
-  @ApiBody(zodBody(loginSchema, 'Login request'))
-  @ApiResponse({ status: 200, description: 'Login successful; merchant object returned. konfirm_session cookie set.' })
-  @ApiResponse({ status: 401, description: 'Invalid credentials (same response for wrong email or wrong password).' })
-  async login(
-    @Body(new ZodValidationPipe(loginSchema)) body: z.infer<typeof loginSchema>,
-    @Res({ passthrough: true }) res: Response,
-  ) {
-    const { token, merchant } = await this.auth.login(body.email, body.password);
-    this.setSessionCookie(res, token);
-    return { merchant };
-  }
-
-  // Always the same response, whether or not the email has an account. A
-  // mail failure is logged server-side and not shown to the caller, because
-  // showing it would tell an attacker the address was real.
-  @Post('forgot-password')
-  @HttpCode(200)
-  @Throttle(FORGOT_THROTTLE)
-  @ApiOperation({
-    summary: 'Request a password-reset email',
-    description:
-      'Always returns `{ ok: true }` regardless of whether the email exists — ' +
-      'prevents enumeration. Rate-limited to 5 req/min per IP.',
-  })
-  @ApiBody(zodBody(forgotPasswordSchema, 'Forgot password request'))
-  @ApiResponse({ status: 200, description: 'Always returns { ok: true }.' })
-  async forgotPassword(@Body(new ZodValidationPipe(forgotPasswordSchema)) body: z.infer<typeof forgotPasswordSchema>) {
-    try {
-      await this.auth.requestPasswordReset(body.email);
-    } catch (err) {
-      this.logger.error(`password reset email failed: ${err instanceof Error ? err.message : String(err)}`);
+    const merchant = result.rows[0];
+    if (!merchant) {
+      return res.status(404).json({ error: 'not_found' });
     }
     return { ok: true };
   }
@@ -394,4 +346,13 @@ export class AuthController {
       maxAge: COOKIE_MAX_AGE_MS,
     });
   }
+}
+
+export async function referrals(req: Request, res: Response) {
+  const merchantId = (req as any).merchantId;
+  const result = await pool.query(
+    `SELECT id, code, created_at FROM referral_codes WHERE merchant_id = $1`,
+    [merchantId]
+  );
+  return res.json({ referrals: result.rows });
 }

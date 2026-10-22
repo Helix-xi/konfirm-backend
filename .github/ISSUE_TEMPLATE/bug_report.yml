@@ -1,0 +1,62 @@
+name: Bug report
+description: Something in the backend behaves incorrectly.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. **Don't file security vulnerabilities here** — report them privately through the repository's Security tab ("Report a vulnerability").
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What's wrong, in one or two sentences?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Requests, commands or code that trigger the bug.
+      placeholder: |
+        1. POST /auth/...
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include status codes, response bodies and relevant log lines (with secrets and tokens removed).
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: File and line references, failing test output, or screenshots.
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Environment
+      options:
+        - Local development
+        - Staging / preview
+        - Production
+        - CI
+    validations:
+      required: true
+  - type: dropdown
+    id: network
+    attributes:
+      label: Stellar network
+      options:
+        - Testnet
+        - Mainnet
+        - Not applicable

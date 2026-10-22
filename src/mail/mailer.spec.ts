@@ -12,6 +12,41 @@ describe('mailerFromEnv', () => {
   it('never falls back to logging in production', () => {
     expect(mailerFromEnv({ NODE_ENV: 'production' })).toBeInstanceOf(UnconfiguredMailer);
   });
+
+  it.each([undefined, 'staging', 'preview', 'test', 'Development', 'prod'])(
+    'does not log mail bodies when NODE_ENV is %p',
+    (nodeEnv) => {
+      const mailer = mailerFromEnv(nodeEnv === undefined ? {} : { NODE_ENV: nodeEnv });
+      expect(mailer).not.toBeInstanceOf(LogMailer);
+      expect(mailer).toBeInstanceOf(UnconfiguredMailer);
+    },
+  );
+
+  it('uses the logging mailer outside development only on explicit opt-in', () => {
+    expect(mailerFromEnv({ NODE_ENV: 'staging', MAIL_LOG_FALLBACK: 'true' })).toBeInstanceOf(LogMailer);
+    expect(mailerFromEnv({ NODE_ENV: 'staging', MAIL_LOG_FALLBACK: '1' })).toBeInstanceOf(UnconfiguredMailer);
+  });
+
+  it('never logs in production, even with the opt-in flag', () => {
+    expect(mailerFromEnv({ NODE_ENV: 'production', MAIL_LOG_FALLBACK: 'true' })).toBeInstanceOf(UnconfiguredMailer);
+  });
+});
+
+describe('UnconfiguredMailer', () => {
+  it('never writes the message body, which may carry a reset token', async () => {
+    const log = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+    const error = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const secret = 'https://app.example/reset?token=SECRET-RESET-TOKEN';
+      await mailerFromEnv({ NODE_ENV: 'staging' }).send({ to: 'a@b.co', subject: 'Reset your password', text: secret });
+      const written = [...log.mock.calls, ...error.mock.calls].flat().join('\n');
+      expect(written).not.toContain('SECRET-RESET-TOKEN');
+      expect(written).toContain('NOT SENT');
+    } finally {
+      log.mockRestore();
+      error.mockRestore();
+    }
+  });
 });
 
 describe('HttpMailer', () => {
