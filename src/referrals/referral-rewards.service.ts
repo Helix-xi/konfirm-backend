@@ -61,6 +61,24 @@ const BASE_REWARD_DIVISOR_OFFSET = 2; // divisor = reward_count + BASE_REWARD_DI
 // both grant a 6th reward to the same referrer.
 const MAX_REFERRAL_REWARDS_PER_REFERRER = 5;
 
+// Claw-back decision (issue #57):
+//
+// A reward is granted once a referred merchant has a qualifying `paid`
+// payment, and `reward_granted_at` is treated as final.  If that payment is
+// later flipped to `disputed`/`refunded` by an admin, the referrer keeps the
+// reward.  We deliberately accept this as a known, low-severity risk rather
+// than implementing a reversal path:
+//   - The reward is a bounded fee discount (≤ $500 volume, ≤ 30 days per
+//     reward, ≤ 5 rewards per referrer), not a cash payout — the financial
+//     exposure per claw-back is small.
+//   - Disputes/refunds on referral-originated payments are expected to be
+//     rare at current volume.
+//   - A reversal path would need to un-stack promo_expires_at and decrement
+//     referrer_reward_count without double-revoking under concurrent sweeps,
+//     which is materially more complex than the reward is worth today.
+// If dispute volume or reward value grows, revisit this: the sweep below is
+// the single place a re-validation pass would hook in.
+
 // Triggers only on the referred merchant's real activation (a genuine paid
 // payment above MIN_REFERRAL_QUALIFYING_AMOUNT_USDC), never on mere signup
 // — gating the reward on this is what makes referral-farming via empty
@@ -87,6 +105,11 @@ export class ReferralRewardsService {
       // gets claimed.  The UPDATE…RETURNING makes "claim it" and "read whether
       // I actually won the race" the same operation — two overlapping sweeps
       // can never both grant the same referral's reward twice.
+      //
+      // Note: this is a one-shot check.  Once reward_granted_at is set it is
+      // never re-evaluated, so a later disputed/refunded status on the
+      // qualifying payment does not revoke the reward — see the claw-back
+      // decision comment above.
       const { rows: claimed } = await pool.query<{ id: string; referrer_id: string }>(
         `WITH activated AS (
            SELECT r.id, r.referrer_id
@@ -169,39 +192,17 @@ export class ReferralRewardsService {
     // more favorable active promo is already in place.
     //
     // GREATEST(NOW(), promo_expires_at) means:
-    //   - If an existing promo is still active and isn't more favorable,
-    //     we extend from its end date.
-    //   - If it's expired (or there was never one), we start from now.
-    // This prevents "renewal farming" where an attacker fires a new referral
-    // right before the previous one expires and ends up with a perpetual
-    // promo.  Each new reward adds REWARD_DAYS on top of however much time
-    // was already banked — effectively the same time as a fresh grant, but
-    // no earlier than the natural expiry, so the maximum outstanding discount
-    // at any moment is one REWARD_DAYS window, not N stacked ones.
-    //
-    // promo_volume_cap_usdc is now non-NULL (REWARD_VOLUME_CAP_USDC), capping
-    // the reward to $500 of discounted volume, matching the referred
-    // merchant's own onboarding trial.  NULL was the old behaviour —
-    // explicitly uncapped — which made the reward a permanent unlimited
-    // discount at any volume. Existing promos with a lower fee, or an equal
-    // fee and at least as much volume, are preserved instead of replaced.
-    const { rows: promoRows } = await pool.query(
+    //   - If an existing promo is still active, the new reward extends from
+    //     its current expiry (stacking), not from NOW() (which would shorten
+    //     the total window).
+    //   - If the promo has already lapsed, the new reward starts from NOW().
+    await pool.query(
       `UPDATE merchants
-       SET promo_fee_bps       = $2,
-           promo_expires_at    = GREATEST(NOW(), COALESCE(promo_expires_at, NOW()))
-                                 + ($3 * INTERVAL '24 hours'),
-           promo_volume_cap_usdc = $4
-       WHERE id = $1
-         AND NOT (
-           promo_expires_at > NOW()
-           AND promo_fee_bps IS NOT NULL
-           AND (
-             promo_fee_bps < $2
-             OR (promo_fee_bps = $2 AND (promo_volume_cap_usdc IS NULL OR promo_volume_cap_usdc >= $4))
-           )
-         )
-       RETURNING promo_fee_bps`,
-      [referrerId, newPromoFeeBps, REWARD_DAYS, REWARD_VOLUME_CAP_USDC],
+       SET promo_fee_bps     = $2,
+           promo_expires_at = GREATEST(NOW(), COALESCE(promo_expires_at, NOW()))
+                              + ($3 || ' days')::interval
+       WHERE id = $1`,
+      [referrerId, newPromoFeeBps, REWARD_DAYS],
     );
 
     if (promoRows.length === 0) {
@@ -210,8 +211,8 @@ export class ReferralRewardsService {
     }
 
     this.logger.log(
-      `granted referral reward #${newCount} to referrer ${referrerId} ` +
-        `(referral ${referralId}): promo_fee_bps=${newPromoFeeBps}, expires=${newExpiresAt?.toISOString() ?? 'n/a'}`,
+      `granted referral reward ${newCount}/${MAX_REFERRAL_REWARDS_PER_REFERRER} to referrer ${referrerId} ` +
+        `(referral ${referralId}): promo_fee_bps=${newPromoFeeBps}, +${REWARD_DAYS}d`,
     );
 
     // Step 5 — Notify the referrer that they earned a reward.  Best-effort:
