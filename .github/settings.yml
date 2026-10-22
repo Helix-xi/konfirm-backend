@@ -1,0 +1,9 @@
+# Repository settings as code, applied by the Settings GitHub App
+# (https://github.com/apps/settings) when it is installed on this repo.
+# Without the app this file is documentation only: an admin must apply the
+# same values in Settings, or with the `gh api` command in the PR that added it.
+repository:
+  # #119: the wiki was never initialized; all docs live in-repo.
+  has_wiki: false
+  # #120: delete merged feature branches automatically.
+  delete_branch_on_merge: true

@@ -160,9 +160,26 @@ export class PaymentsService {
   // yet) — only the destination, asset, amount, and memo are fixed ahead of
   // time. A wallet lacking a USDC trustline is expected to prompt for one
   // itself; SEP-7 has no equivalent to bundling ChangeTrust in advance.
+  //
+  // SEP-7's `pay` request can only express a single payment, so it cannot
+  // carry the additive platform-fee leg that prepareTx adds as a second
+  // operation. Serving a fee-free URI for a fee-bearing link would be a
+  // complete fee bypass (the same link pays $0 if the payer scans the QR
+  // instead of using Freighter). So when the link's effective fee is
+  // non-zero we refuse to build a URI at all, forcing fee-bearing
+  // checkouts onto prepareTx. This is enforced here, server-side, not via
+  // any frontend toggle.
   async buildPayUri(linkId: string, muxedId: string): Promise<{ uri: string }> {
     const link = await this.loadPayableLink(linkId);
     const asset = resolveAsset(link.currency);
+
+    const feeBps = await getEffectiveFeeBps(link.merchant_id);
+    const feeAmount = feeStroops(toStroops(String(link.amount_usdc)), feeBps, toStroops(platformFeeFloor()));
+    if (feeAmount > 0n) {
+      throw new BadRequestException(
+        'this link carries a platform fee and cannot be paid via a SEP-7 QR code; use the prepared-transaction checkout instead',
+      );
+    }
 
     const parts = [
       `destination=${encodeURIComponent(link.stellar_base_address)}`,
