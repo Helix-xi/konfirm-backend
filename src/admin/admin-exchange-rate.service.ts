@@ -30,7 +30,7 @@ export class AdminExchangeRateService {
   async liveXlmUsdcRate(): Promise<{ rate: string | null; reachable: boolean }> {
     try {
       const url = `${HORIZON_URL}/order_book?selling_asset_type=native&buying_asset_type=credit_alphanum4&buying_asset_code=USDC&buying_asset_issuer=${USDC_ISSUER}`;
-      const res = await fetch(url);
+      const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
       if (!res.ok) throw new Error(`horizon returned ${res.status}`);
       const body = (await res.json()) as OrderBookResponse;
       const bestBid = body.bids[0] ? Number(body.bids[0].price) : null;

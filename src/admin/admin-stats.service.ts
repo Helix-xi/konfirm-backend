@@ -1,7 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { pool } from '../db/pool';
-
-const TERMINAL_WITHDRAWAL_STATUSES = ['completed', 'error', 'expired', 'refunded'];
+import { TERMINAL_WITHDRAWAL_STATUSES } from '../common/withdrawal-statuses';
 
 export interface AdminStats {
   merchants: { total: number; active: number; suspended: number; pending: number };
