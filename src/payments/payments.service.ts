@@ -42,7 +42,11 @@ export class PaymentsService {
     if (link.expires_at && new Date(link.expires_at) < new Date()) {
       throw new BadRequestException('link has expired');
     }
-    if (!link.amount_usdc) {
+    // `pg` returns NUMERIC as a non-empty string, so a stored "0"/"0.0000000"
+    // is truthy — a plain `!link.amount_usdc` check never fires for it and
+    // the zero amount would later blow up Operation.payment() as a 500.
+    // Compare the parsed numeric value instead.
+    if (link.amount_usdc === null || link.amount_usdc === undefined || Number(link.amount_usdc) <= 0) {
       throw new BadRequestException('pay-what-you-want links need an amount param (not yet implemented)');
     }
     if (!link.stellar_base_address) {
@@ -184,11 +188,4 @@ export class PaymentsService {
     const issuer = asset.getIssuer();
     if (!asset.isNative() && issuer) {
       parts.push(`asset_code=${encodeURIComponent(asset.getCode())}`);
-      parts.push(`asset_issuer=${encodeURIComponent(issuer)}`);
-    }
-    parts.push(`memo=${encodeURIComponent(muxedId)}`);
-    parts.push('memo_type=id');
-
-    return { uri: `web+stellar:pay?${parts.join('&')}` };
-  }
-}
+   

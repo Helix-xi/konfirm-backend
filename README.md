@@ -575,5 +575,5 @@ I don't have credentials for any of this — these steps need to be done directl
 
 ## Handsoff notes
 
-<!-- handsoff-issue-59 -->
-- #59: bazaar_listings missing a plain created_at index for unfiltered admin queries
+<!-- handsoff-issue-62 -->
+- #62: README API reference omits the referral and public Bazaar endpoints
