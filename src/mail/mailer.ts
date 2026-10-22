@@ -64,3 +64,66 @@ export function mailerFromEnv(env: NodeJS.ProcessEnv = process.env): Mailer {
   if (env.NODE_ENV === 'production') return new UnconfiguredMailer();
   return new LogMailer();
 }
+
+// Merchant-facing transactional notifications. These build the message bodies
+// for the events a merchant needs to hear about (payment confirmed, payment
+// held/flagged, referral earned) so call sites only supply the facts. The
+// Mailer transport above stays the single way mail leaves the system.
+
+export interface PaymentNotification {
+  merchantEmail: string;
+  amount: string;
+  currency: string;
+  reference: string;
+}
+
+export interface HeldPaymentNotification extends PaymentNotification {
+  reason?: string;
+}
+
+export interface ReferralEarnedNotification {
+  merchantEmail: string;
+  rewardAmount: string;
+  currency: string;
+  referredMerchant?: string;
+}
+
+export function paymentConfirmedMail(n: PaymentNotification): OutgoingMail {
+  return {
+    to: n.merchantEmail,
+    subject: `Payment received — ${n.amount} ${n.currency}`,
+    text: [
+      `A payment of ${n.amount} ${n.currency} has been confirmed.`,
+      `Reference: ${n.reference}`,
+      '',
+      'View the details in your activity tab.',
+    ].join('\n'),
+  };
+}
+
+export function paymentHeldMail(n: HeldPaymentNotification): OutgoingMail {
+  return {
+    to: n.merchantEmail,
+    subject: `Payment held for review — ${n.amount} ${n.currency}`,
+    text: [
+      `A payment of ${n.amount} ${n.currency} has been held for review.`,
+      `Reference: ${n.reference}`,
+      ...(n.reason ? [`Reason: ${n.reason}`] : []),
+      '',
+      'Check your activity tab for next steps.',
+    ].join('\n'),
+  };
+}
+
+export function referralEarnedMail(n: ReferralEarnedNotification): OutgoingMail {
+  return {
+    to: n.merchantEmail,
+    subject: `Referral reward earned — ${n.rewardAmount} ${n.currency}`,
+    text: [
+      `You earned a referral reward of ${n.rewardAmount} ${n.currency}.`,
+      ...(n.referredMerchant ? [`Referred merchant: ${n.referredMerchant}`] : []),
+      '',
+      'See your referrals tab for details.',
+    ].join('\n'),
+  };
+}
