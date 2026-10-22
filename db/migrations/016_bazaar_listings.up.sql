@@ -29,6 +29,12 @@ CREATE TABLE IF NOT EXISTS bazaar_listings (
 -- default view both filter on status first, ordered by recency.
 CREATE INDEX idx_bazaar_listings_status ON bazaar_listings (status, created_at DESC);
 
+-- At most one approved listing per URL: the public manifest must never list
+-- the same URL twice. Partial so pending/rejected duplicates can still exist
+-- (they're surfaced to the reviewing admin instead of hard-blocked).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_bazaar_listings_approved_url
+    ON bazaar_listings (url) WHERE status = 'approved';
+
 -- Konfirm's own facilitator entry, migrated in pre-approved — the manifest
 -- must never regress to zero facilitators just because the registry is new
 -- and empty. Same content the static manifest already published.

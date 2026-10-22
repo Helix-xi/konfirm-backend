@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { pool } from '../db/pool';
+import { Mailer } from '../mail/mailer';
 
 // ---------------------------------------------------------------------------
 // Referral reward constants
@@ -89,6 +90,8 @@ const MAX_REFERRAL_REWARDS_PER_REFERRER = 5;
 @Injectable()
 export class ReferralRewardsService {
   private readonly logger = new Logger(ReferralRewardsService.name);
+
+  constructor(private readonly mailer: Mailer) {}
 
   @Cron('*/5 * * * *')
   async sweep(): Promise<void> {
@@ -185,7 +188,8 @@ export class ReferralRewardsService {
     const divisor = newCount + (BASE_REWARD_DIVISOR_OFFSET - 1);
     const newPromoFeeBps = Math.max(Math.floor(feeBps / divisor), 1);
 
-    // Step 4 — Stack (extend) the reward rather than reset it.
+    // Step 4 — Stack (extend) the reward rather than reset it, unless a
+    // more favorable active promo is already in place.
     //
     // GREATEST(NOW(), promo_expires_at) means:
     //   - If an existing promo is still active, the new reward extends from
@@ -201,9 +205,42 @@ export class ReferralRewardsService {
       [referrerId, newPromoFeeBps, REWARD_DAYS],
     );
 
+    if (promoRows.length === 0) {
+      this.logger.log(`kept the more favorable active promo for merchant ${referrerId}`);
+      return;
+    }
+
     this.logger.log(
       `granted referral reward ${newCount}/${MAX_REFERRAL_REWARDS_PER_REFERRER} to referrer ${referrerId} ` +
         `(referral ${referralId}): promo_fee_bps=${newPromoFeeBps}, +${REWARD_DAYS}d`,
     );
+
+    // Step 5 — Notify the referrer that they earned a reward.  Best-effort:
+    // a mail failure must never roll back or retry the already-committed
+    // reward, so we swallow and log rather than throw.
+    try {
+      const { rows: merchantRows } = await pool.query<{ email: string | null; business_name: string | null }>(
+        `SELECT email, business_name FROM merchants WHERE id = $1`,
+        [referrerId],
+      );
+      const email = merchantRows[0]?.email;
+      if (email) {
+        const businessName = merchantRows[0]?.business_name ?? 'there';
+        const expiresText = newExpiresAt ? newExpiresAt.toISOString().slice(0, 10) : 'soon';
+        await this.mailer.send({
+          to: email,
+          subject: 'You earned a referral reward',
+          text:
+            `Hi ${businessName},\n\n` +
+            `Good news — a merchant you referred just made their first qualifying payment, ` +
+            `so you've earned a referral reward.\n\n` +
+            `Your fee is now ${newPromoFeeBps} bps on up to ${REWARD_VOLUME_CAP_USDC} USDC of volume, ` +
+            `valid through ${expiresText}.\n\n` +
+            `Keep referring to stack more rewards (up to ${MAX_REFERRAL_REWARDS_PER_REFERRER} total).\n`,
+        });
+      }
+    } catch (err) {
+      this.logger.error(`failed to send referral-earned email to referrer ${referrerId}: ${err}`);
+    }
   }
 }

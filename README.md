@@ -50,6 +50,7 @@ node -e "console.log(require('crypto').randomBytes(48).toString('base64'))"
 | `APP_URL` | Yes in production | Public frontend origin, used to build password-reset links |
 | `MAIL_WEBHOOK_URL` | Yes in production | Relay that receives `{ to, subject, text }` as JSON for transactional email. Without it, production logs `NOT SENT` and no reset email goes out (`src/mail/mailer.ts`) |
 | `MAIL_WEBHOOK_TOKEN` | No | Sent as a Bearer token to `MAIL_WEBHOOK_URL` when set |
+| `MAIL_LOG_FALLBACK` | No | Without `MAIL_WEBHOOK_URL`, mail bodies (including reset links) are printed to the log only when `NODE_ENV=development` exactly, or when this is set to exactly `true`. Any other environment (unset, staging, preview) drops the mail and logs only its subject. Never set it anywhere others can read the logs. Ignored in production |
 | `TRUST_PROXY_HOPS` | No | Reverse-proxy hops in front of the API. Defaults to `1` in production (Railway's edge). Rate limits key on the client address, so this must match the real chain. Too high lets clients forge `X-Forwarded-For` |
 | `ENABLE_TESTNET_FAUCET` | No | Set to exactly `true` to open the `/deposits` testnet faucet. Off by default, so production answers those routes with 404 |
 | `PORT` | No | Defaults to `3001` |
