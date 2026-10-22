@@ -572,3 +572,8 @@ I don't have credentials for any of this — these steps need to be done directl
 ## License
 
 [MIT](LICENSE)
+
+## Handsoff notes
+
+<!-- handsoff-issue-59 -->
+- #59: bazaar_listings missing a plain created_at index for unfiltered admin queries

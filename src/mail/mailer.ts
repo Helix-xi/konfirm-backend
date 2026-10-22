@@ -44,7 +44,6 @@ export class HttpMailer implements Mailer {
 // logged reset link is an account takeover for anyone who can read the logs.
 export class LogMailer implements Mailer {
   async send(mail: OutgoingMail): Promise<void> {
-    // eslint-disable-next-line no-console
     console.log(`[mail:dev] to=${mail.to} subject="${mail.subject}"\n${mail.text}`);
   }
 }
@@ -55,7 +54,6 @@ export class LogMailer implements Mailer {
 // succeeds from the user's side, so the gap must be closed before launch.
 export class UnconfiguredMailer implements Mailer {
   async send(mail: OutgoingMail): Promise<void> {
-    // eslint-disable-next-line no-console
     console.error(`[mail] NOT SENT — no MAIL_WEBHOOK_URL configured. Subject "${mail.subject}" was dropped.`);
   }
 }
