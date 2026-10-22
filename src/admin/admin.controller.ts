@@ -21,6 +21,7 @@ import { AdminWalletsService } from './admin-wallets.service';
 import { AdminExchangeRateService } from './admin-exchange-rate.service';
 import { AdminReferralsService } from './admin-referrals.service';
 import { AdminBazaarService } from './admin-bazaar.service';
+import { AdminTeamService } from './admin-team.service';
 import { FacilitatorSpendGuardService } from '../facilitator/facilitator-spend-guard.service';
 import { AuthService } from '../auth/auth.service';
 import { zodBody } from '../common/zod-to-openapi';
@@ -74,7 +75,6 @@ const setBazaarListingStatusSchema = z.object({
 @ApiTags('Admin')
 @Controller('admin')
 @UseGuards(AdminGuard)
-@ApiCookieAuth('admin-session')
 export class AdminController {
   constructor(
     private readonly merchants: AdminMerchantsService,
@@ -97,6 +97,7 @@ export class AdminController {
     private readonly bazaar: AdminBazaarService,
     private readonly facilitatorSpendGuard: FacilitatorSpendGuardService,
     private readonly auth: AuthService,
+    private readonly adminTeam: AdminTeamService,
   ) {}
 
   @Get('stats')
@@ -124,50 +125,16 @@ export class AdminController {
     return this.merchants.list(limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
   }
 
-  // For a merchant who has lost their password. Sends the same emailed link
-  // the self-service flow does, and records who asked and why. Admins never
-  // see or set the password.
-  @Post('merchants/:id/password-reset')
-  @HttpCode(200)
-  @ApiOperation({
-    summary: 'Send a merchant a password-reset email',
-    description:
-      'Emails the merchant a reset link (same as self-service forgot-password). ' +
-      'Only for active accounts. Admin never sees or sets the password. Logged to admin_actions.',
-  })
-  @ApiParam({ name: 'id', description: 'Merchant UUID', type: 'string' })
-  @ApiBody(zodBody(passwordResetSchema, 'Password reset reason'))
-  @ApiResponse({ status: 200, description: 'Returns { ok: true }.' })
-  @ApiResponse({ status: 400, description: 'Merchant is not active.' })
-  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  @ApiResponse({ status: 404, description: 'Merchant not found.' })
-  async sendMerchantPasswordReset(
-    @Param('id') id: string,
-    @Body(new ZodValidationPipe(passwordResetSchema)) body: z.infer<typeof passwordResetSchema>,
-    @Req() req: AuthedAdminRequest,
-  ) {
-    const email = await this.merchants.emailForPasswordReset(id);
-    await this.auth.requestPasswordReset(email);
-    await this.actions.log(req.admin.id, 'merchant.password-reset-sent', 'merchant', id, { reason: body.reason });
-    return { ok: true };
+  @Get('admins')
+  async listAdmins(@CurrentAdmin() admin: AdminClaims) {
+    this.assertSuperadmin(admin);
+    return this.adminService.listAdmins();
   }
 
-  @Patch('merchants/:id/status')
-  @ApiOperation({
-    summary: 'Set merchant status',
-    description:
-      'Suspend or reactivate a merchant. Takes effect immediately — an already-issued session ' +
-      'cookie stops working at the next request once suspended (AuthGuard re-checks status per request).',
-  })
-  @ApiParam({ name: 'id', description: 'Merchant UUID', type: 'string' })
-  @ApiBody(zodBody(setMerchantStatusSchema, 'Set merchant status'))
-  @ApiResponse({ status: 200, description: 'Updated merchant record.' })
-  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  @ApiResponse({ status: 404, description: 'Merchant not found.' })
-  async setMerchantStatus(
-    @Param('id') id: string,
-    @Body(new ZodValidationPipe(setMerchantStatusSchema)) body: z.infer<typeof setMerchantStatusSchema>,
-    @Req() req: AuthedAdminRequest,
+  @Post('admins')
+  async createAdmin(
+    @CurrentAdmin() admin: AdminClaims,
+    @Body() dto: CreateAdminDto,
   ) {
     const merchant = await this.merchants.setStatus(id, body.status);
     await this.actions.log(req.admin.id, 'merchant.status', 'merchant', id, {
@@ -317,8 +284,6 @@ export class AdminController {
   @ApiResponse({ status: 404, description: 'Listing not found.' })
   async setBazaarListingStatus(
     @Param('id') id: string,
-    @Body(new ZodValidationPipe(setBazaarListingStatusSchema)) body: z.infer<typeof setBazaarListingStatusSchema>,
-    @Req() req: AuthedAdminRequest,
   ) {
     const listing = await this.bazaar.setListingStatus(id, body.status);
     await this.actions.log(req.admin.id, 'bazaar.listing.status', 'bazaar_listing', id, {

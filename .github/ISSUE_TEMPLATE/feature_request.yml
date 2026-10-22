@@ -1,0 +1,32 @@
+name: Feature request
+description: Propose new behavior or an improvement.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What should the backend do that it doesn't today?
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: Who needs this and why? What's the current workaround, if any?
+    validations:
+      required: true
+  - type: textarea
+    id: approach
+    attributes:
+      label: Proposed approach
+      description: Endpoints, modules, migrations or env vars involved, and any alternatives considered.
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      placeholder: |
+        - [ ] ...
+        - [ ] Tests cover ...
+    validations:
+      required: true

@@ -1,7 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { pool } from '../db/pool';
-
-const TERMINAL_WITHDRAWAL_STATUSES = ['completed', 'error', 'expired', 'refunded'];
+import { TERMINAL_WITHDRAWAL_STATUSES } from '../common/withdrawal-statuses';
 
 // Reconciler cursor movement older than this is surfaced as stale so the
 // Overview can warn instead of showing a bare timestamp.
